@@ -32,4 +32,8 @@ library/redis:7.0.15
 # 私有镜像仓库
 library/registry:3.1.1
 
+# add  funds_valuation
+ghcr.io/whboy10000/funds_valuation:latest
+ghcr.io/whboy10000/funds_valuation:2.1.1
+ghcr.io/whboy10000/funds_valuation:1.1.1
 
