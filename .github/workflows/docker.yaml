@@ -49,10 +49,26 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    # 本流程只做 pull/tag/push，用不到 buildx，移除以避免额外占用 Docker 存储
+    # 阿里云 ACR 个人版不认识 OCI 1.1 provenance attestation
+    # (application/vnd.oci.empty.v1+json)：buildx 构建的镜像在源仓库是 OCI index，
+    # 其中 unknown/unknown 的 attestation manifest 使用空 OCI config，
+    # docker pull/tag/push 会把整个 index 原样推过去，ACR 在提交 manifest 时直接拒绝。
+    # 改用 skopeo 做 registry -> registry 复制：默认只取单平台、不复制 attestation，
+    # 并强制输出 Docker schema2(v2s2) manifest；镜像也不再落地到本地 Docker 存储。
+    - name: Install skopeo
+      run: |
+        if ! command -v skopeo >/dev/null 2>&1; then
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq skopeo
+        fi
+        skopeo --version
+
     - name: Build and push image Aliyun
       run: |
-        docker login -u $ALIYUN_REGISTRY_USER -p $ALIYUN_REGISTRY_PASSWORD $ALIYUN_REGISTRY
+        auth_file="$RUNNER_TEMP/skopeo-auth.json"
+        echo "$ALIYUN_REGISTRY_PASSWORD" | skopeo login --authfile "$auth_file" \
+            -u "$ALIYUN_REGISTRY_USER" --password-stdin "$ALIYUN_REGISTRY"
+
         # 数据预处理,判断镜像是否重名
         declare -A duplicate_images
         declare -A temp_map
@@ -113,15 +129,6 @@ jobs:
             fi
             echo "platform_prefix is $platform_prefix"
 
-            # 显式指定平台，只拉取单平台 manifest。
-            # 阿里云 ACR 个人版不认识 OCI 1.1 provenance attestation
-            # (application/vnd.oci.empty.v1+json)：若把源镜像的 OCI index 原样推过去，
-            # 会在层全部上传完后、提交 manifest 时被拒(unknown manifest class)。
-            # 未指定架构时默认 linux/amd64。
-            pull_platform="${platform:-linux/amd64}"
-            echo "docker pull --platform $pull_platform $image"
-            docker pull --platform "$pull_platform" "$image"
-
             # 获取 镜像名:版本号  例如nginx:1.25.3
             image_name_tag=$(echo "$image" | awk -F'/' '{print $NF}')
             # 获取命名空间 例如kasmweb  这里有种特殊情况 docker.io/nginx，把docker.io当成命名空间，也OK
@@ -141,19 +148,28 @@ jobs:
             # 将@sha256:等字符删除
             image_name_tag="${image_name_tag%%@*}"
             new_image="$ALIYUN_REGISTRY/$ALIYUN_NAME_SPACE/$platform_prefix$name_space_prefix$image_name_tag"
-            echo "docker tag $image $new_image"
-            docker tag $image $new_image
-            echo "docker push $new_image"
-            docker push $new_image
-            echo "开始清理磁盘空间"
+
+            # 把 --platform=linux/arm64[/v8] 转成 skopeo 选择平台的参数
+            override_args=()
+            if [ -n "$platform" ]; then
+                p_os="${platform%%/*}"
+                p_rest="${platform#*/}"
+                p_arch="${p_rest%%/*}"
+                override_args+=(--override-os "$p_os" --override-arch "$p_arch")
+                if [ "$p_rest" != "$p_arch" ]; then
+                    override_args+=(--override-variant "${p_rest#*/}")
+                fi
+            fi
+
+            # 不带 --all：只复制单平台镜像，源 OCI index 中的 unknown/unknown
+            # attestation manifest 不会被复制；--format v2s2 强制输出 Docker schema2。
+            echo "skopeo copy docker://$image -> docker://$new_image"
+            skopeo copy --dest-authfile "$auth_file" --format v2s2 \
+                "${override_args[@]}" \
+                "docker://$image" "docker://$new_image"
+
             echo "=============================================================================="
             df -hT
             echo "=============================================================================="
-            docker rmi -f "$image" "$new_image" 2>/dev/null || true
-            docker image prune -a --force
-            echo "磁盘空间清理完毕"
-            echo "=============================================================================="
-            df -hT
-            echo "=============================================================================="     
-            
+
         done < images.txt
