@@ -25,22 +25,19 @@ jobs:
         df -hT
         echo "=============================================================================="
 
-    # 增加可用磁盘空间
-    - name: Maximize build space
-      uses: easimon/maximize-build-space@master
-      with:
-
-        root-reserve-mb: 2048
-        swap-size-mb: 128
-        remove-dotnet: 'true'
-        remove-haskell: 'true'
-        # 如果空间还是不够用，可以把以下开启，清理出更多空间
-        # remove-android: 'true'
-        # remove-codeql: 'true'
-        build-mount-path: '/var/lib/docker/'
-
-    - name: Restart docker
-      run: sudo service docker restart
+    # 直接清理根分区(/)上预装的大件来腾出空间。
+    # 不要再用 easimon/maximize-build-space：它会缩小根分区并重建 LVM，
+    # 在新版 runner(2.338.x) 上反而让根分区只剩 2GB，
+    # 导致 Runner 连自身 _diag 日志都写不进去(No space left on device)而崩溃。
+    - name: Free up disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /opt/hostedtoolcache/CodeQL
+        sudo rm -rf /usr/local/share/boost
+        sudo rm -rf /usr/lib/jvm
+        docker image prune --all --force || true
 
     - name: Free up disk space complete
       run: |
@@ -52,9 +49,7 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Docker Setup Buildx
-      uses: docker/setup-buildx-action@v3
-
+    # 本流程只做 pull/tag/push，用不到 buildx，移除以避免额外占用 Docker 存储
     - name: Build and push image Aliyun
       run: |
         docker login -u $ALIYUN_REGISTRY_USER -p $ALIYUN_REGISTRY_PASSWORD $ALIYUN_REGISTRY
@@ -147,8 +142,8 @@ jobs:
             echo "=============================================================================="
             df -hT
             echo "=============================================================================="
-            docker rmi $image
-            docker rmi $new_image
+            docker rmi -f "$image" "$new_image" 2>/dev/null || true
+            docker image prune -a --force
             echo "磁盘空间清理完毕"
             echo "=============================================================================="
             df -hT
